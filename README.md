@@ -58,7 +58,9 @@ LLM 请求上下文监控面板（Context Toolbox）。
 注册于 `/{plugin}/...`，页面端通过 bridge 以相对 endpoint 访问：
 
 - `GET requests?limit=&provider=&session=&q=` — 摘要列表
-- `GET requests/<id>` — 单条完整记录
+- `GET requests/<id>` — 单条完整记录，返回 `{ "record": {...} }`
+  （包一层 record：记录自带顶层 `status` 字段，避免与 Dashboard bridge 的
+  `{status: "error"}` 错误信封约定冲突）
 - `GET stats` — 统计信息
 - `POST clear` — 清空记录
 - `GET export` — 导出 JSON 文件

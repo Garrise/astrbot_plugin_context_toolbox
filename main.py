@@ -705,7 +705,9 @@ class ContextToolboxPlugin(Star):
     async def api_detail(self, req_id: str):
         for rec in reversed(self.recorder.records):
             if rec["id"] == req_id:
-                return json_response(rec)
+                # 记录自带顶层 status 字段（ok/error），会撞上 Dashboard
+                # bridge 的错误信封约定，这里包一层 record 规避
+                return json_response({"record": rec})
         return error_response("record not found", status_code=404)
 
     async def api_stats(self):

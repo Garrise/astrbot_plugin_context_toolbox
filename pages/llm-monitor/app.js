@@ -181,8 +181,8 @@ async function selectRequest(id) {
   });
   renderList();
   try {
-    const rec = await bridge.apiGet(`requests/${id}`);
-    renderDetail(rec);
+    const res = await bridge.apiGet(`requests/${id}`);
+    renderDetail(res.record || res);
   } catch (e) {
     $("#detail").innerHTML = "";
     $("#detail").appendChild(el("div", "empty", `加载详情失败: ${e.message}`));
