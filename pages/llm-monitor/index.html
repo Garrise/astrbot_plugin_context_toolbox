@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>LLM 请求监控</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header class="toolbar">
+        <div class="stats" id="stats"></div>
+        <div class="controls">
+          <input id="search" type="search" placeholder="搜索内容 / 会话 / 模型…" autocomplete="off" />
+          <select id="provider">
+            <option value="">全部 Provider</option>
+          </select>
+          <button id="refresh" title="重新拉取列表">刷新</button>
+          <button id="live" title="实时跟踪新请求">▶ 实时</button>
+          <button id="export" title="导出全部记录为 JSON">导出</button>
+          <button id="clear" class="danger" title="清空内存中的记录">清空</button>
+        </div>
+      </header>
+      <main class="layout">
+        <section class="list-pane">
+          <div id="list" class="req-list">
+            <div class="empty">加载中…</div>
+          </div>
+        </section>
+        <section class="detail-pane">
+          <div id="detail" class="detail">
+            <div class="empty">选择左侧的一条请求查看上下文结构</div>
+          </div>
+        </section>
+      </main>
+    </div>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

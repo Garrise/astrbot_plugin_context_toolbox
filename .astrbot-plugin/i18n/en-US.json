@@ -1,0 +1,13 @@
+{
+  "metadata": {
+    "display_name": "Context Toolbox",
+    "short_desc": "LLM request context monitor",
+    "desc": "Monitors every LLM request in the current AstrBot instance, records the request context structure and response content, and lets you browse, search, follow live and export JSON from the WebUI plugin page."
+  },
+  "pages": {
+    "llm-monitor": {
+      "title": "LLM Request Monitor",
+      "description": "Inspect the context structure and content of every LLM request"
+    }
+  }
+}

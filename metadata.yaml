@@ -1,0 +1,10 @@
+name: astrbot_plugin_context_toolbox
+display_name: Context Toolbox
+short_desc: LLM 请求上下文监控面板
+desc: >-
+  监控当前 AstrBot 实例中的每一次 LLM 请求，记录请求上下文结构（System Prompt、对话
+  contexts、工具定义、多模态内容）与响应内容（文本、思考、工具调用、Token 用量），
+  并可在 WebUI 插件页面中浏览、搜索、实时跟踪与导出 JSON。
+author: haro
+version: 0.1.0
+astrbot_version: ">=4.26"

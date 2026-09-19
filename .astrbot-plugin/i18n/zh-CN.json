@@ -1,0 +1,13 @@
+{
+  "metadata": {
+    "display_name": "Context Toolbox",
+    "short_desc": "LLM 请求上下文监控面板",
+    "desc": "监控当前 AstrBot 实例中的每一次 LLM 请求，记录请求上下文结构与响应内容，并可在 WebUI 插件页面中浏览、搜索、实时跟踪与导出 JSON。"
+  },
+  "pages": {
+    "llm-monitor": {
+      "title": "LLM 请求监控",
+      "description": "查看每一次 LLM 请求的上下文结构和内容"
+    }
+  }
+}
