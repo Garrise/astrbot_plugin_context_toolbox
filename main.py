@@ -28,6 +28,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import aiofiles  # AstrBot 核心依赖，随本体安装
+
 from astrbot.api.star import Context, Star
 from astrbot.api.web import (
     error_response,
@@ -238,10 +240,100 @@ class LLMRecorder:
         self.max_content_length = 50_000
         self.records: deque[dict] = deque(maxlen=200)
         self.listeners: set[asyncio.Queue] = set()
+        # 持久化（可选）：JSONL 异步追加写入，重启后自动加载最近记录
+        self.persist_enabled = False
+        self.persist_path: Path | None = None
+        self.persist_queue: asyncio.Queue | None = None
+        self._writer_task: asyncio.Task | None = None
 
     def set_capacity(self, max_records: int) -> None:
         if max_records != (self.records.maxlen or 0):
             self.records = deque(self.records, maxlen=max_records)
+
+    # ---------------- 持久化 ---------------- #
+
+    def start_persist(self, path: Path) -> None:
+        """启动后台写盘任务。调用前应先完成 load_persisted + compact_persist_file。"""
+        self.persist_path = path
+        self.persist_queue = asyncio.Queue(maxsize=500)
+        self._writer_task = asyncio.create_task(self._persist_writer())
+
+    async def stop_persist(self) -> None:
+        """停止写盘任务：发送哨兵并等待剩余记录刷完（最多 5 秒）。"""
+        if self._writer_task is None:
+            return
+        if self.persist_queue is not None:
+            try:
+                self.persist_queue.put_nowait(None)
+            except asyncio.QueueFull:
+                pass
+        try:
+            await asyncio.wait_for(self._writer_task, timeout=5)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            self._writer_task.cancel()
+        self._writer_task = None
+        self.persist_queue = None
+
+    async def _persist_writer(self) -> None:
+        q = self.persist_queue
+        path = self.persist_path
+        assert q is not None and path is not None
+        while True:
+            line = await q.get()
+            if line is None:
+                break
+            try:
+                async with aiofiles.open(path, "a", encoding="utf-8") as f:
+                    await f.write(line + "\n")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[context_toolbox] persist write failed: %s", exc)
+
+    def load_persisted(self, path: Path, limit: int) -> int:
+        """从 JSONL 文件加载最近 limit 条记录到内存缓冲区，返回加载条数。"""
+        if not path.exists():
+            return 0
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[context_toolbox] load persisted failed: %s", exc)
+            return 0
+        loaded = 0
+        for line in lines[-limit:]:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except Exception:  # noqa: BLE001
+                continue
+            if isinstance(rec, dict) and rec.get("id"):
+                self.records.append(rec)
+                loaded += 1
+        return loaded
+
+    def compact_persist_file(self) -> None:
+        """用当前内存中的记录重写持久化文件，控制文件体积（原子替换）。"""
+        if self.persist_path is None:
+            return
+        try:
+            tmp = self.persist_path.with_name(self.persist_path.name + ".tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                for rec in self.records:
+                    f.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
+            tmp.replace(self.persist_path)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[context_toolbox] compact persist file failed: %s", exc)
+
+    def truncate_persist_file(self) -> None:
+        """清空持久化文件（配合内存清空使用）。"""
+        if self.persist_path is None:
+            return
+        try:
+            with open(self.persist_path, "w", encoding="utf-8"):
+                pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[context_toolbox] truncate persist file failed: %s", exc)
 
     def commit(
         self,
@@ -278,6 +370,15 @@ class LLMRecorder:
                 "error": error,
             }
             self.records.append(rec)
+            if self.persist_enabled and self.persist_queue is not None:
+                try:
+                    self.persist_queue.put_nowait(
+                        json.dumps(rec, ensure_ascii=False, default=str)
+                    )
+                except asyncio.QueueFull:
+                    logger.warning(
+                        "[context_toolbox] persist queue full, record not persisted"
+                    )
             summary = summarize(rec)
             payload = {"event": "request", "summary": summary}
             for q in list(self.listeners):
@@ -468,6 +569,7 @@ class ContextToolboxPlugin(Star):
             self.recorder.set_capacity(max(10, int(conf.get("max_records", 200))))
         except (TypeError, ValueError):
             pass
+        self.recorder.persist_enabled = bool(conf.get("persist_enabled", False))
         # 记录被 patch 前的原始方法，terminate 时恢复
         self._originals: dict[tuple[type, str], Any] = {}
         self._register_web_apis(context)
@@ -477,8 +579,23 @@ class ContextToolboxPlugin(Star):
     # ------------------------------------------------------------------ #
 
     async def initialize(self) -> None:
-        """所有插件加载完成后，包装 Provider 的 text_chat / text_chat_stream。"""
+        """所有插件加载完成后，包装 Provider 方法并启动持久化。"""
         self._sweep_patch()
+        if self.recorder.persist_enabled:
+            data_dir = Path(get_astrbot_plugin_data_path()) / PLUGIN_NAME
+            data_dir.mkdir(parents=True, exist_ok=True)
+            path = data_dir / "records.jsonl"
+            limit = self.recorder.records.maxlen or 200
+            loaded = self.recorder.load_persisted(path, limit=limit)
+            self.recorder.persist_path = path
+            # 用加载后的内存记录压缩文件，控制体积
+            self.recorder.compact_persist_file()
+            self.recorder.start_persist(path)
+            logger.info(
+                "[context_toolbox] persistence enabled: %s (loaded %d records)",
+                path,
+                loaded,
+            )
 
     def _sweep_patch(self) -> int:
         """扫描 Provider 及其所有子类，包装尚未包装的
@@ -511,7 +628,8 @@ class ContextToolboxPlugin(Star):
         return patched
 
     async def terminate(self) -> None:
-        """插件卸载时恢复原始方法，取消所有 SSE 监听。"""
+        """插件卸载时恢复原始方法，停止持久化并取消所有 SSE 监听。"""
+        await self.recorder.stop_persist()
         for (cls, name), fn in self._originals.items():
             try:
                 setattr(cls, name, fn)
@@ -634,6 +752,8 @@ class ContextToolboxPlugin(Star):
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 "enabled": self.recorder.enabled,
+                "persist_enabled": self.recorder.persist_enabled,
+                "persist_path": str(self.recorder.persist_path or ""),
                 "capacity": self.recorder.records.maxlen,
                 "providers": providers,
             }
@@ -641,6 +761,8 @@ class ContextToolboxPlugin(Star):
 
     async def api_clear(self):
         self.recorder.records.clear()
+        if self.recorder.persist_enabled:
+            self.recorder.truncate_persist_file()
         return json_response({"cleared": True})
 
     async def api_export(self):

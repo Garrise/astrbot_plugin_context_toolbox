@@ -98,6 +98,25 @@ body {
   color: var(--err);
 }
 
+.chip.persist-on .chip-value {
+  color: var(--ok);
+}
+
+.chip.persist-off .chip-value {
+  color: var(--text-dim);
+}
+
+.persist-path {
+  color: var(--text-dim);
+  font-size: 11px;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  max-width: 380px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: help;
+}
+
 .chip-label {
   color: var(--text-dim);
   font-size: 12px;

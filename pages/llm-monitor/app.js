@@ -7,6 +7,7 @@ const state = {
   selectedId: null,
   live: false,
   sseId: null,
+  stats: null,
   filters: { q: "", provider: "" },
   knownProviders: new Set(),
 };
@@ -68,6 +69,7 @@ async function loadStats() {
 }
 
 function renderStats(s) {
+  state.stats = s;
   const box = $("#stats");
   box.innerHTML = "";
   const chip = (label, value, cls) => {
@@ -80,6 +82,20 @@ function renderStats(s) {
   box.appendChild(chip("错误", fmtNum(s.errors), s.errors ? "err" : ""));
   box.appendChild(chip("Tokens", fmtNum(s.total_tokens)));
   box.appendChild(chip("容量", `${fmtNum(s.total)}/${fmtNum(s.capacity)}`));
+  const persistChip = chip(
+    "持久化",
+    s.persist_enabled ? "开" : "关",
+    s.persist_enabled ? "persist-on" : "persist-off",
+  );
+  persistChip.title = s.persist_enabled
+    ? `记录保存路径：${s.persist_path}（重启后自动加载最近记录）`
+    : "未开启持久化，重启后记录清空；可在插件配置中开启 persist_enabled";
+  box.appendChild(persistChip);
+  if (s.persist_enabled && s.persist_path) {
+    const pathEl = el("span", "persist-path", s.persist_path);
+    pathEl.title = "记录保存路径（JSONL，重启后自动加载）";
+    box.appendChild(pathEl);
+  }
   if (!s.enabled) {
     box.appendChild(el("span", "warn-badge", "记录已关闭"));
   }
@@ -489,7 +505,11 @@ $("#export").addEventListener("click", async () => {
 });
 
 $("#clear").addEventListener("click", async () => {
-  if (!confirm("确定清空内存中的所有 LLM 请求记录吗？")) return;
+  const persistNote =
+    state.stats && state.stats.persist_enabled
+      ? `（将同时清空磁盘文件 ${state.stats.persist_path}）`
+      : "";
+  if (!confirm(`确定清空内存中的所有 LLM 请求记录吗？${persistNote}`)) return;
   try {
     await bridge.apiPost("clear", {});
     state.items = [];

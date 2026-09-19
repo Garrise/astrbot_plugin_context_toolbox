@@ -5,11 +5,17 @@
     "default": true,
     "hint": "关闭后不再记录新的 LLM 请求（修改后需重载插件生效）。"
   },
+  "persist_enabled": {
+    "description": "持久化记录到磁盘",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后记录会异步追加保存到 data/plugin_data/astrbot_plugin_context_toolbox/records.jsonl，AstrBot 重启后自动加载最近记录；关闭则仅存内存、重启即清空。页面顶部会显示当前保存路径。"
+  },
   "max_records": {
     "description": "内存中保留的最大记录条数",
     "type": "int",
     "default": 200,
-    "hint": "超出后自动丢弃最旧的记录（修改后需重载插件生效）。"
+    "hint": "超出后自动丢弃最旧的记录；持久化模式下重启时也只会加载该条数（修改后需重载插件生效）。"
   },
   "max_content_length": {
     "description": "单个文本字段最大长度（字符）",

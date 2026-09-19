@@ -18,14 +18,21 @@ LLM 请求上下文监控面板（Context Toolbox）。
   - 响应 `response`：回复文本、思考内容、工具调用、Token 用量、错误信息
 - **实时跟踪**：SSE 实时推送新请求（页面点击"实时"开启）。
 - **搜索/过滤**：全文搜索请求与响应内容，按 Provider 过滤。
+- **可选持久化**：配置 `persist_enabled` 后记录异步落盘到
+  `data/plugin_data/astrbot_plugin_context_toolbox/records.jsonl`，重启 AstrBot 后自动加载最近记录；页面顶部实时显示持久化状态与保存路径。
 - **导出**：一键导出全部记录为 JSON 文件。
 
 ## 实现说明
 
 - 通过包装 `Provider.text_chat` / `Provider.text_chat_stream`（monkey patch，插件卸载时自动恢复）
   捕获所有走 AstrBot Provider 的 LLM 调用，包括 Agent 工具循环中的多轮请求。
-- 记录保存在**内存环形缓冲区**（默认 200 条，可配置），不写磁盘；重启 AstrBot 后清空。
-- 超长文本按配置截断（默认单字段 50000 字符），避免内存膨胀。
+- 记录保存在内存环形缓冲区中（默认 200 条，可配置）。
+- 开启 `persist_enabled` 后，每条记录经异步队列追加写入
+  `data/plugin_data/astrbot_plugin_context_toolbox/records.jsonl`（JSONL 格式），
+  不阻塞 LLM 请求路径；插件启动时自动加载最近 `max_records` 条并压缩文件。
+  关闭时仅存内存，重启即清空。
+- 超长文本按配置截断（默认单字段 50000 字符），避免内存与文件膨胀。
+- 页面"清空"会同时清空内存与持久化文件；"导出"始终生成独立 JSON 快照。
 - 页面通过 AstrBot 插件 Pages bridge（`window.AstrBotPluginPage`）访问后端 Web API。
 
 ## 配置（_conf_schema.json）
@@ -33,7 +40,8 @@ LLM 请求上下文监控面板（Context Toolbox）。
 | 配置项 | 默认 | 说明 |
 | --- | --- | --- |
 | `enabled` | `true` | 是否记录 LLM 请求 |
-| `max_records` | `200` | 内存保留的最大记录条数 |
+| `persist_enabled` | `false` | 是否持久化到磁盘（`data/plugin_data/astrbot_plugin_context_toolbox/records.jsonl`），重启后自动加载 |
+| `max_records` | `200` | 内存保留的最大记录条数（持久化模式下重启加载同条数） |
 | `max_content_length` | `50000` | 单个文本字段最大字符数，超出截断 |
 | `record_response` | `true` | 是否记录响应内容（关闭则只记录请求侧） |
 
