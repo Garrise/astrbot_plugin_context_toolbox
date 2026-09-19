@@ -277,6 +277,17 @@ button.danger:hover {
   background: color-mix(in srgb, var(--warn) 12%, transparent);
 }
 
+.badge.pp {
+  color: var(--role-system);
+  background: color-mix(in srgb, var(--role-system) 12%, transparent);
+}
+
+.pp-info {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 .rr-mid {
   flex: 1;
   min-width: 0;

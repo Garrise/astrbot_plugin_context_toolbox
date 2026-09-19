@@ -38,7 +38,7 @@ from astrbot.api.web import (
     request,
     stream_response,
 )
-from astrbot.core.agent.message import Message
+from astrbot.core.agent.message import Message, TextPart
 from astrbot.core.agent.tool import ToolSet
 from astrbot.core.provider.entities import LLMResponse
 from astrbot.core.provider.provider import Provider
@@ -203,6 +203,7 @@ def summarize(rec: dict) -> dict:
         else []
     )
     usage = resp.get("usage") or {}
+    pp = req.get("postprocess") or {}
     return {
         "id": rec["id"],
         "ts": rec["ts"],
@@ -218,6 +219,8 @@ def summarize(rec: dict) -> dict:
         "has_system_prompt": bool(req.get("system_prompt")),
         "tool_count": len(tool_names),
         "tool_names": tool_names,
+        "postprocessed": bool(pp.get("changed")),
+        "postprocess_label": pp.get("mode_label") or "",
         "total_tokens": usage.get("total", 0),
         "input_tokens": (usage.get("input_other", 0) or 0)
         + (usage.get("input_cached", 0) or 0),
@@ -229,6 +232,249 @@ def summarize(rec: dict) -> dict:
         if resp
         else "",
     }
+
+
+# ------------------------------------------------------------------ #
+# 提示词后处理（参考 SillyTavern prompt processing）
+# 在请求发送给 Provider 之前重组 contexts，解决 ChatTemplate 对
+# 系统消息位置 / 角色交替顺序的限制。
+# ------------------------------------------------------------------ #
+
+PP_MODES = ("none", "merge_consecutive", "semi_strict", "strict", "single_user")
+
+PP_MODE_LABELS = {
+    "none": "无",
+    "merge_consecutive": "合并连续消息",
+    "semi_strict": "半严格",
+    "strict": "严格",
+    "single_user": "单用户 (Mega User)",
+}
+
+# 严格模式下注入的虚拟用户消息内容
+VIRTUAL_USER_CONTENT = "..."
+
+
+def _mget(msg, key):
+    """统一读取 Message 对象或 dict 的字段。"""
+    if isinstance(msg, Message):
+        return getattr(msg, key, None)
+    if isinstance(msg, dict):
+        return msg.get(key)
+    return None
+
+
+def _part_type(part):
+    return part.get("type") if isinstance(part, dict) else getattr(part, "type", None)
+
+
+def _part_get(part, key):
+    return part.get(key) if isinstance(part, dict) else getattr(part, key, None)
+
+
+def _is_mergeable(msg) -> bool:
+    """可参与合并的消息：普通 user/assistant/system，且不带工具结构。"""
+    role = _mget(msg, "role")
+    if role not in ("user", "assistant", "system"):
+        return False
+    if _mget(msg, "tool_calls"):
+        return False
+    if _mget(msg, "tool_call_id"):
+        return False
+    return True
+
+
+def _merge_contents(a, b):
+    """合并两条消息的 content（str 或 内容分块列表）。"""
+    if a is None or a == "":
+        return b if b is not None else ""
+    if b is None or b == "":
+        return a
+    if isinstance(a, str) and isinstance(b, str):
+        return a + "\n" + b
+    la = [TextPart(text=a)] if isinstance(a, str) else list(a)
+    lb = [TextPart(text=b)] if isinstance(b, str) else list(b)
+    merged: list = []
+    for part in la + lb:
+        if (
+            merged
+            and _part_type(merged[-1]) == "text"
+            and _part_type(part) == "text"
+            and type(merged[-1]) is type(part)
+        ):
+            prev = merged[-1]
+            text = (_part_get(prev, "text") or "") + "\n" + (_part_get(part, "text") or "")
+            merged[-1] = (
+                TextPart(text=text) if isinstance(prev, TextPart) else {**prev, "text": text}
+            )
+        else:
+            merged.append(part)
+    return merged
+
+
+def _with_role(msg, new_role):
+    """把消息转换为指定角色，保留内容。"""
+    if isinstance(msg, Message):
+        return Message(role=new_role, content=msg.content)
+    newd = dict(msg)
+    newd["role"] = new_role
+    return newd
+
+
+def _new_user(content, sample=None):
+    """构造一条用户消息，类型与现有上下文元素保持一致（dict 或 Message）。"""
+    if isinstance(sample, dict):
+        return {"role": "user", "content": content}
+    return Message(role="user", content=content)
+
+
+def _merge_consecutive_msgs(contexts: list) -> list:
+    """合并连续同角色的多条消息为一条（工具相关与 checkpoint 消息除外）。"""
+    out: list = []
+    for msg in contexts:
+        if (
+            out
+            and _is_mergeable(msg)
+            and _is_mergeable(out[-1])
+            and _mget(out[-1], "role") == _mget(msg, "role")
+            and type(out[-1]) is type(msg)
+        ):
+            prev = out[-1]
+            merged_content = _merge_contents(
+                _mget(prev, "content"), _mget(msg, "content")
+            )
+            if merged_content is None:
+                out.append(msg)
+                continue
+            if isinstance(prev, Message):
+                out[-1] = Message(role=prev.role, content=merged_content)
+            else:
+                newd = dict(prev)
+                newd["content"] = merged_content
+                out[-1] = newd
+        else:
+            out.append(msg)
+    return out
+
+
+def _semi_strict_msgs(contexts: list) -> list:
+    """合并连续消息 + 只允许一条系统消息：后续系统消息转为用户消息。"""
+    merged = _merge_consecutive_msgs(contexts)
+    out: list = []
+    seen_system = False
+    for msg in merged:
+        if _mget(msg, "role") == "system":
+            if not seen_system:
+                seen_system = True
+                out.append(msg)
+            else:
+                out.append(_with_role(msg, "user"))
+        else:
+            out.append(msg)
+    return out
+
+
+def _strict_msgs(contexts: list) -> list:
+    """半严格 + 系统提示后的第一条消息必须是用户消息，否则注入虚拟用户消息。"""
+    out = _semi_strict_msgs(contexts)
+    start = 1 if out and _mget(out[0], "role") == "system" else 0
+    sample = out[0] if out else None
+    if start >= len(out) or _mget(out[start], "role") != "user":
+        out.insert(start, _new_user(VIRTUAL_USER_CONTENT, sample))
+    return out
+
+
+def _content_to_plain(content) -> str:
+    """把 content（str / 分块列表）压成纯文本，非文本分块用占位符表示。"""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        out = []
+        for part in content:
+            ptype = _part_type(part)
+            if ptype == "text":
+                out.append(_part_get(part, "text") or "")
+            elif ptype == "think":
+                think = _part_get(part, "think") or ""
+                if think:
+                    out.append(f"[思考]\n{think}")
+            elif ptype in ("image_url", "audio_url"):
+                url = _part_get(part, ptype)
+                if isinstance(url, dict):
+                    url = url.get("url", "")
+                url = str(url or "")
+                if len(url) > 120:
+                    url = url[:120] + "…"
+                label = "图片" if ptype == "image_url" else "音频"
+                out.append(f"[{label}: {url}]")
+        return "\n".join(x for x in out if x)
+    return str(content)
+
+
+_ROLE_LABELS = {
+    "system": "System",
+    "user": "User",
+    "assistant": "Assistant",
+    "tool": "Tool",
+}
+
+
+def _single_user_msg(contexts: list):
+    """把所有消息剥离角色，融合成一条巨大的用户消息。"""
+    sample = contexts[0] if contexts else None
+    blocks = []
+    for msg in contexts:
+        role = _mget(msg, "role")
+        if role == "_checkpoint":
+            continue
+        label = _ROLE_LABELS.get(role, str(role or "?"))
+        text = _content_to_plain(_mget(msg, "content"))
+        block = f"[{label}]\n{text}" if text else f"[{label}]"
+        tcs = _mget(msg, "tool_calls")
+        if isinstance(tcs, list):
+            for tc in tcs:
+                fn = tc.get("function") if isinstance(tc, dict) else _mget(tc, "function")
+                name = _mget(fn, "name") if fn is not None else "?"
+                args = _mget(fn, "arguments") if fn is not None else None
+                block += f"\n[调用工具: {name}({_truncate(str(args), 500)})]"
+        blocks.append(block)
+    if not blocks:
+        return None
+    return _new_user("\n\n".join(blocks), sample)
+
+
+def postprocess_contexts(contexts: list, mode: str) -> tuple[list, dict]:
+    """按模式重组 contexts，返回 (新列表, 处理信息)。失败 fail-open 返回原列表。"""
+    info = {
+        "mode": mode,
+        "mode_label": PP_MODE_LABELS.get(mode, mode),
+        "changed": False,
+        "original_count": len(contexts),
+        "final_count": len(contexts),
+    }
+    if mode == "none" or not isinstance(contexts, list) or not contexts:
+        return contexts, info
+    try:
+        if mode == "merge_consecutive":
+            new_ctx = _merge_consecutive_msgs(contexts)
+        elif mode == "semi_strict":
+            new_ctx = _semi_strict_msgs(contexts)
+        elif mode == "strict":
+            new_ctx = _strict_msgs(contexts)
+        elif mode == "single_user":
+            one = _single_user_msg(contexts)
+            new_ctx = [one] if one is not None else contexts
+        else:
+            return contexts, info
+        info["final_count"] = len(new_ctx)
+        info["changed"] = len(new_ctx) != len(contexts) or any(
+            a is not b for a, b in zip(contexts, new_ctx)
+        )
+        return new_ctx, info
+    except Exception as exc:  # noqa: BLE001
+        info["error"] = f"{type(exc).__name__}: {exc}"
+        return contexts, info
 
 
 class LLMRecorder:
@@ -413,51 +659,101 @@ class LLMRecorder:
         return out
 
 
-def _extract_request(
-    sig: inspect.Signature, args: tuple, kwargs: dict, maxlen: int
-) -> dict:
-    """从调用参数中提取需要记录的请求字段。"""
-    arguments: dict[str, Any] = {}
+def _bind_arguments(sig, self_obj, args, kwargs):
+    """把调用参数绑定为 dict（含 **kwargs 展开），返回 (arguments, bound)。
+    bound 为 None 表示无法可靠绑定（签名异常）。"""
     try:
-        bound = sig.bind_partial(None, *args, **kwargs)
+        bound = sig.bind_partial(self_obj, *args, **kwargs)
         arguments = dict(bound.arguments)
         arguments.pop("self", None)
-        # 若原函数使用 **kwargs（VAR_KEYWORD），把其中的字段展开到顶层
         var_kw = arguments.pop("kwargs", None)
         if isinstance(var_kw, dict):
             for k, v in var_kw.items():
                 arguments.setdefault(k, v)
+        return arguments, bound
     except TypeError:
-        arguments = dict(kwargs)
+        return dict(kwargs), None
+
+
+def _serialize_request_args(arguments: dict, maxlen: int) -> dict:
+    """从参数字典序列化需要记录的请求字段。"""
     info: dict[str, Any] = {}
     for name in _RECORDED_FIELDS:
         if name in arguments:
             info[name] = _serialize(arguments[name], maxlen)
-    extra = {
-        k: v for k, v in arguments.items() if k not in _RECORDED_FIELDS
-    }
+    extra = {k: v for k, v in arguments.items() if k not in _RECORDED_FIELDS}
     if extra:
         info["extra"] = _serialize(extra, maxlen)
     return info
 
 
-def _make_text_chat_wrapper(original, recorder: LLMRecorder):
+def _apply_postprocess(arguments: dict, bound, mode: str):
+    """对 arguments 中的 contexts 应用后处理。
+    返回 (call_args, call_kwargs, pp_info, orig_ctx)。"""
+    call_args = bound.args if bound is not None else None
+    call_kwargs = bound.kwargs if bound is not None else None
+    if mode == "none" or bound is None:
+        return call_args, call_kwargs, None, None
+    orig_ctx = arguments.get("contexts")
+    if not isinstance(orig_ctx, list) or not orig_ctx:
+        return call_args, call_kwargs, None, orig_ctx
+    sent_ctx, pp_info = postprocess_contexts(orig_ctx, mode)
+    if pp_info.get("changed"):
+        arguments["contexts"] = sent_ctx
+        bound.arguments["contexts"] = sent_ctx
+        call_args, call_kwargs = bound.args, bound.kwargs
+    return call_args, call_kwargs, pp_info, orig_ctx
+
+
+def _make_text_chat_wrapper(original, recorder: LLMRecorder, get_mode):
     sig = inspect.signature(original)
 
     async def wrapper(self, *args, **kwargs):
         depth = _depth.get()
-        if depth > 0 or not recorder.enabled:
+        if depth > 0:
+            return await original(self, *args, **kwargs)
+        mode = get_mode()
+        if mode == "none" and not recorder.enabled:
             return await original(self, *args, **kwargs)
         token = _depth.set(depth + 1)
         started = time.time()
         try:
-            request_info = _extract_request(sig, args, kwargs, recorder.max_content_length)
+            arguments, bound = _bind_arguments(sig, self, args, kwargs)
+        except Exception:  # noqa: BLE001
+            arguments, bound = dict(kwargs), None
+        try:
+            call_args, call_kwargs, pp_info, orig_ctx = _apply_postprocess(
+                arguments, bound, mode
+            )
+        except Exception:  # noqa: BLE001
+            call_args, call_kwargs, pp_info, orig_ctx = None, None, None, None
+        if call_args is None:
+            call_args = (self,) + tuple(args)
+        if call_kwargs is None:
+            call_kwargs = dict(kwargs)
+        if not recorder.enabled:
+            try:
+                return await original(*call_args, **call_kwargs)
+            finally:
+                _depth.reset(token)
+        try:
+            request_info = _serialize_request_args(
+                arguments, recorder.max_content_length
+            )
         except Exception:  # noqa: BLE001
             request_info = {}
+        if pp_info and pp_info.get("changed"):
+            request_info["postprocess"] = pp_info
+            try:
+                request_info["contexts_original"] = _serialize(
+                    orig_ctx, recorder.max_content_length
+                )
+            except Exception:  # noqa: BLE001
+                pass
         result = None
         error = None
         try:
-            result = await original(self, *args, **kwargs)
+            result = await original(*call_args, **call_kwargs)
             return result
         except Exception as exc:  # noqa: BLE001
             error = f"{type(exc).__name__}: {exc}"
@@ -473,25 +769,61 @@ def _make_text_chat_wrapper(original, recorder: LLMRecorder):
     return wrapper
 
 
-def _make_stream_wrapper(original, recorder: LLMRecorder):
+def _make_stream_wrapper(original, recorder: LLMRecorder, get_mode):
     sig = inspect.signature(original)
 
     async def wrapper(self, *args, **kwargs):
         depth = _depth.get()
-        if depth > 0 or not recorder.enabled:
+        if depth > 0:
+            async for item in original(self, *args, **kwargs):
+                yield item
+            return
+        mode = get_mode()
+        if mode == "none" and not recorder.enabled:
             async for item in original(self, *args, **kwargs):
                 yield item
             return
         token = _depth.set(depth + 1)
         started = time.time()
         try:
-            request_info = _extract_request(sig, args, kwargs, recorder.max_content_length)
+            arguments, bound = _bind_arguments(sig, self, args, kwargs)
+        except Exception:  # noqa: BLE001
+            arguments, bound = dict(kwargs), None
+        try:
+            call_args, call_kwargs, pp_info, orig_ctx = _apply_postprocess(
+                arguments, bound, mode
+            )
+        except Exception:  # noqa: BLE001
+            call_args, call_kwargs, pp_info, orig_ctx = None, None, None, None
+        if call_args is None:
+            call_args = (self,) + tuple(args)
+        if call_kwargs is None:
+            call_kwargs = dict(kwargs)
+        if not recorder.enabled:
+            try:
+                async for item in original(*call_args, **call_kwargs):
+                    yield item
+            finally:
+                _depth.reset(token)
+            return
+        try:
+            request_info = _serialize_request_args(
+                arguments, recorder.max_content_length
+            )
         except Exception:  # noqa: BLE001
             request_info = {}
+        if pp_info and pp_info.get("changed"):
+            request_info["postprocess"] = pp_info
+            try:
+                request_info["contexts_original"] = _serialize(
+                    orig_ctx, recorder.max_content_length
+                )
+            except Exception:  # noqa: BLE001
+                pass
         final_resp: LLMResponse | None = None
         error = None
         try:
-            async for resp in original(self, *args, **kwargs):
+            async for resp in original(*call_args, **call_kwargs):
                 if isinstance(resp, LLMResponse) and not getattr(resp, "is_chunk", False):
                     final_resp = resp
                 yield resp
@@ -570,6 +902,8 @@ class ContextToolboxPlugin(Star):
         except (TypeError, ValueError):
             pass
         self.recorder.persist_enabled = bool(conf.get("persist_enabled", False))
+        mode = str(conf.get("prompt_postprocess_mode", "none"))
+        self.postprocess_mode = mode if mode in PP_MODES else "none"
         # 记录被 patch 前的原始方法，terminate 时恢复
         self._originals: dict[tuple[type, str], Any] = {}
         self._register_web_apis(context)
@@ -614,10 +948,19 @@ class ContextToolboxPlugin(Star):
                 except (TypeError, ValueError):
                     continue
                 self._originals[(cls, name)] = fn
+                get_mode = lambda: self.postprocess_mode  # noqa: E731
                 if name == "text_chat":
-                    setattr(cls, name, _make_text_chat_wrapper(fn, self.recorder))
+                    setattr(
+                        cls,
+                        name,
+                        _make_text_chat_wrapper(fn, self.recorder, get_mode),
+                    )
                 else:
-                    setattr(cls, name, _make_stream_wrapper(fn, self.recorder))
+                    setattr(
+                        cls,
+                        name,
+                        _make_stream_wrapper(fn, self.recorder, get_mode),
+                    )
                 patched += 1
         if patched:
             logger.info(
@@ -668,6 +1011,12 @@ class ContextToolboxPlugin(Star):
         )
         context.register_web_api(
             f"/{PLUGIN_NAME}/stream", self.api_stream, ["GET"], "SSE live request stream"
+        )
+        context.register_web_api(
+            f"/{PLUGIN_NAME}/postprocess",
+            self.api_set_postprocess,
+            ["POST"],
+            "Set prompt post-process mode",
         )
 
     async def api_list(self):
@@ -756,10 +1105,25 @@ class ContextToolboxPlugin(Star):
                 "enabled": self.recorder.enabled,
                 "persist_enabled": self.recorder.persist_enabled,
                 "persist_path": str(self.recorder.persist_path or ""),
+                "postprocess_mode": self.postprocess_mode,
+                "postprocess_modes": [
+                    {"value": m, "label": PP_MODE_LABELS[m]} for m in PP_MODES
+                ],
                 "capacity": self.recorder.records.maxlen,
                 "providers": providers,
             }
         )
+
+    async def api_set_postprocess(self):
+        payload = await request.json(default={})
+        mode = payload.get("mode")
+        if mode not in PP_MODES:
+            return error_response(
+                f"invalid mode, expected one of: {', '.join(PP_MODES)}"
+            )
+        self.postprocess_mode = mode
+        logger.info("[context_toolbox] postprocess mode set to: %s", mode)
+        return json_response({"mode": mode, "mode_label": PP_MODE_LABELS[mode]})
 
     async def api_clear(self):
         self.recorder.records.clear()

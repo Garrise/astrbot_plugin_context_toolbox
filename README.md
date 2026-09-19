@@ -16,6 +16,14 @@ LLM 请求上下文监控面板（Context Toolbox）。
   - 工具定义 `func_tool`（名称、描述、JSON Schema 参数）
   - `tool_calls_result`、`tool_choice` 等其它请求参数
   - 响应 `response`：回复文本、思考内容、工具调用、Token 用量、错误信息
+- **提示词后处理**（参考 SillyTavern）：请求发送前重组 `contexts`，解决 ChatTemplate
+  对系统消息位置/角色交替的拦截。五种模式，页面顶部可实时切换：
+  - `none` 无：按原样发送，不做结构修改
+  - `merge_consecutive` 合并连续消息：同一角色连续多条压缩合并为一条
+  - `semi_strict` 半严格：合并连续 + 只允许一条系统消息，后续系统消息转为用户消息
+  - `strict` 严格：半严格 + 系统提示后第一条必须是用户消息，否则注入虚拟用户消息
+  - `single_user` 单用户 Mega User：全部消息剥离角色，融合为一条巨大用户消息
+  记录中保留"原始 contexts"与"实际发送"的对比，列表带「后处理」徽标。
 - **实时跟踪**：SSE 实时推送新请求（页面点击"实时"开启）。
 - **搜索/过滤**：全文搜索请求与响应内容，按 Provider 过滤。
 - **可选持久化**：配置 `persist_enabled` 后记录异步落盘到
@@ -44,6 +52,7 @@ LLM 请求上下文监控面板（Context Toolbox）。
 | `max_records` | `200` | 内存保留的最大记录条数（持久化模式下重启加载同条数） |
 | `max_content_length` | `50000` | 单个文本字段最大字符数，超出截断 |
 | `record_response` | `true` | 是否记录响应内容（关闭则只记录请求侧） |
+| `prompt_postprocess_mode` | `none` | 提示词后处理模式（页面可实时切换，无需重载） |
 
 修改配置后需要重载插件生效。
 

@@ -82,6 +82,7 @@ function renderStats(s) {
   box.appendChild(chip("错误", fmtNum(s.errors), s.errors ? "err" : ""));
   box.appendChild(chip("Tokens", fmtNum(s.total_tokens)));
   box.appendChild(chip("容量", `${fmtNum(s.total)}/${fmtNum(s.capacity)}`));
+  renderPPModeSelect(s);
   const persistChip = chip(
     "持久化",
     s.persist_enabled ? "开" : "关",
@@ -99,6 +100,19 @@ function renderStats(s) {
   if (!s.enabled) {
     box.appendChild(el("span", "warn-badge", "记录已关闭"));
   }
+}
+
+function renderPPModeSelect(s) {
+  const sel = $("#ppmode");
+  if (!sel) return;
+  if (!sel.options.length && Array.isArray(s.postprocess_modes)) {
+    for (const m of s.postprocess_modes) {
+      const opt = el("option", "", `后处理: ${m.label}`);
+      opt.value = m.value;
+      sel.appendChild(opt);
+    }
+  }
+  sel.value = s.postprocess_mode || "none";
 }
 
 /* ---------------- Provider 下拉 ---------------- */
@@ -152,6 +166,11 @@ function renderList() {
     );
     if (it.streaming) badges.appendChild(el("span", "badge stream", "流式"));
     if (it.tool_count) badges.appendChild(el("span", "badge tools", `${it.tool_count} 工具`));
+    if (it.postprocessed) {
+      const ppBadge = el("span", "badge pp", "后处理");
+      ppBadge.title = `提示词后处理：${it.postprocess_label || ""}`;
+      badges.appendChild(ppBadge);
+    }
     left.appendChild(badges);
     row.appendChild(left);
 
@@ -231,6 +250,29 @@ function renderDetail(rec) {
   }
 
   const req = rec.request || {};
+
+  if (req.postprocess) {
+    const pp = req.postprocess;
+    const ppWrap = el("div", "pp-info");
+    ppWrap.appendChild(
+      el(
+        "div",
+        "",
+        `模式：${pp.mode_label || pp.mode}（${pp.original_count} 条 → ${pp.final_count} 条）`,
+      ),
+    );
+    if (pp.error) {
+      ppWrap.appendChild(el("div", "error-box", `后处理出错，已按原样发送：${pp.error}`));
+    }
+    box.appendChild(section("提示词后处理", ppWrap, true));
+  }
+  if (Array.isArray(req.contexts_original)) {
+    const wrap = el("div", "messages");
+    req.contexts_original.forEach((msg, i) => wrap.appendChild(renderMessage(msg, i)));
+    box.appendChild(
+      section(`原始 contexts（后处理前 ${req.contexts_original.length} 条）`, wrap, false),
+    );
+  }
 
   if (req.system_prompt) {
     box.appendChild(section(`System Prompt（${(req.system_prompt || "").length} 字符）`, jsonBlock(req.system_prompt), false));
@@ -487,6 +529,18 @@ $("#search").addEventListener("input", (e) => {
 $("#provider").addEventListener("change", (e) => {
   state.filters.provider = e.target.value;
   loadList();
+});
+
+$("#ppmode").addEventListener("change", async (e) => {
+  const mode = e.target.value;
+  try {
+    const res = await bridge.apiPost("postprocess", { mode });
+    if (state.stats) state.stats.postprocess_mode = res.mode;
+    renderPPModeSelect(state.stats || { postprocess_mode: mode });
+  } catch (err) {
+    alert(`切换后处理模式失败: ${err.message}`);
+    if (state.stats) renderPPModeSelect(state.stats);
+  }
 });
 
 $("#refresh").addEventListener("click", () => {

@@ -28,5 +28,19 @@
     "type": "bool",
     "default": true,
     "hint": "关闭后只记录请求侧（上下文与工具），不记录响应文本/思考内容（修改后需重载插件生效）。"
+  },
+  "prompt_postprocess_mode": {
+    "description": "提示词后处理模式",
+    "type": "string",
+    "options": ["none", "merge_consecutive", "semi_strict", "strict", "single_user"],
+    "labels": [
+      "无（原样发送）",
+      "合并连续消息",
+      "半严格（仅一条系统消息）",
+      "严格（系统后必须用户消息）",
+      "单用户 Mega User"
+    ],
+    "default": "none",
+    "hint": "在请求发送前重组 contexts，解决 ChatTemplate 对系统消息位置/角色交替的拦截。可在监控页面顶部实时切换，无需重载插件。"
   }
 }
