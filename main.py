@@ -19,7 +19,6 @@ import asyncio
 import dataclasses
 import inspect
 import json
-import logging
 import time
 import uuid
 from collections import deque
@@ -30,6 +29,7 @@ from typing import Any
 
 import aiofiles  # AstrBot 核心依赖，随本体安装
 
+from astrbot.api import logger
 from astrbot.api.star import Context, Star
 from astrbot.api.web import (
     error_response,
@@ -43,8 +43,6 @@ from astrbot.core.agent.tool import ToolSet
 from astrbot.core.provider.entities import LLMResponse
 from astrbot.core.provider.provider import Provider
 from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
-
-logger = logging.getLogger("astrbot")
 
 PLUGIN_NAME = "astrbot_plugin_context_toolbox"
 
